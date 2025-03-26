@@ -94,21 +94,41 @@ module biquad8_design(
     reg [127:0] adc0_rereg = {128{1'b0}};
     reg [127:0] adc1_rereg = {128{1'b0}};
     reg adc_gate = 0;
-    wire capture_delay;
-    wire mid_gate_delay;
-    wire gate_delay_done;
-    SRLC32E u_gate_delay(.D(capture_i),
-                         .CLK(aclk),
-                         .CE(1'b1),
-                         .Q31(capture_delay));
-    SRLC32E u_delay_mid(.D(capture_delay),
-                        .CLK(aclk),
-                        .CE(1'b1),
-                        .Q31(mid_gate_delay));                           
-    SRLC32E u_delay_done(.D(mid_gate_delay),
-                         .CLK(aclk),
-                         .CE(1'b1),
-                         .Q31(gate_delay_done));                                 
+
+    // if we have 2 internal delays we need
+    // 3 signals: input to 0, between 0->1, output from 1
+    // so it's NUM_GATE_DELAYS:0
+    // this has to be at least 2
+    localparam NUM_GATE_DELAYS = 3;
+    wire [NUM_GATE_DELAYS:0] internal_chain;
+    assign internal_chain[0] = capture_i;
+    wire gate_delay_done = internal_chain[NUM_GATE_DELAYS];    
+    wire capture_delay = internal_chain[1];
+    generate
+        genvar i;
+        for (i=0;i<NUM_GATE_DELAYS;i=i+1) begin : DLP
+                SRLC32E u_dly(.D(internal_chain[i]),
+                              .CLK(aclk),
+                              .CE(1'b1),
+                              .Q31(internal_chain[i+1]));
+        end
+    endgenerate
+    wire post_gate_delay_0;
+    wire post_gate_delay_1;
+    wire post_gate_finish;
+    reg biquad_reset = 0;
+        SRLC32E u_postgate_0(.D(gate_delay_done),
+                             .CLK(aclk),
+                             .CE(1'b1),
+                             .Q31(post_gate_delay_0));
+        SRLC32E u_postgate_1(.D(post_gate_delay_0),
+                             .CLK(aclk),
+                             .CE(1'b1),
+                             .Q31(post_gate_delay_1));
+        SRLC32E u_postgate_finish(.D(post_gate_delay_1),
+                                  .CLK(aclk),
+                                  .CE(1'b1),
+                                  .Q31(post_gate_finish));
     always @(posedge aclk) begin
         if (capture_delay) adc_gate <= 1'b1;
         else if (gate_delay_done) adc_gate <= 1'b0;
@@ -118,6 +138,9 @@ module biquad8_design(
         
         if (adc_gate) adc1_rereg <= adc1_tdata;
         else adc1_rereg <= {128{1'b0}};
+
+            if (post_gate_delay_1) biquad_reset <= 1'b1;
+            else if (post_gate_finish) biquad_reset <= 1'b0;
     end
     
     assign gate0_tdata = adc0_rereg;
@@ -137,6 +160,7 @@ module biquad8_design(
                   .wb_rst_i(1'b0),
                   `CONNECT_WBS_IFM( wb_ , bq0_ ),
                   .clk_i(aclk),
+                  .rst_i(biquad_reset),
                   .global_update_i(1'b0),
                   .dat_i(unpack(gate0_tdata)),
                   .dat_o(bq_out[0]));   
@@ -152,6 +176,7 @@ module biquad8_design(
                   .wb_rst_i(1'b0),
                   `CONNECT_WBS_IFM( wb_ , bq1_ ),
                   .clk_i(aclk),
+                  .rst_i(biquad_reset),
                   .global_update_i(1'b0),
                   .dat_i(unpack(gate1_tdata)),
                   .dat_o(bq_out[1]));   
